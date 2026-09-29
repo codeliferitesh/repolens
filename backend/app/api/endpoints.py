@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
@@ -13,6 +14,8 @@ from app.services.github_client import (
 from app.models.repository import RepoAnalysisResponse, AssistantAnswer
 from app.analyzers.assistant_analyzer import answer_query
 from app.core.config import settings
+
+logger = logging.getLogger("repolens.api")
 
 router = APIRouter()
 orchestrator = AnalysisOrchestrator()
@@ -119,21 +122,36 @@ async def analyze_repo(request: AnalyzeRequest):
             detail="Repository URL cannot be empty."
         )
 
+    clean_url = request.url.strip()
+    logger.info(f"Received repository request: {clean_url}")
     try:
-        response = await orchestrator.analyze_repository(request.url.strip())
+        response = await orchestrator.analyze_repository(clean_url)
         return response
     except InvalidGitHubURLError as e:
+        logger.warning(f"Invalid repository input '{clean_url}': {e.message}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.message)
     except RepositoryNotFoundError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=e.message)
+        logger.warning(f"Repository not found for '{clean_url}': {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found. Make sure the repository is public and the URL is correct."
+        )
     except RateLimitExceededError as e:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=e.message)
+        logger.warning(f"Rate limit reached during request for '{clean_url}': {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="GitHub API rate limit reached. Please try again later."
+        )
     except GitHubAPIException as e:
+        logger.error(f"GitHub API error for '{clean_url}': {e.message} (status: {e.status_code})")
         raise HTTPException(status_code=e.status_code, detail=e.message)
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.exception(f"Unexpected error while analyzing '{clean_url}': {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected error occurred during repository analysis: {str(e)}"
+            detail="Unexpected backend/GitHub integration error. Please try again later."
         )
 
 @router.post("/ask", response_model=AssistantAnswer)
@@ -144,9 +162,10 @@ async def ask_repolens(request: AskRequest):
             detail="Both repository URL and question are required."
         )
 
+    clean_url = request.url.strip()
     try:
         # Re-fetch repo data
-        analysis = await orchestrator.analyze_repository(request.url.strip())
+        analysis = await orchestrator.analyze_repository(clean_url)
         answer = answer_query(
             question=request.question.strip(),
             metadata=analysis.repository,
@@ -159,8 +178,25 @@ async def ask_repolens(request: AskRequest):
             health=analysis.health
         )
         return answer
+    except InvalidGitHubURLError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.message)
+    except RepositoryNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found. Make sure the repository is public and the URL is correct."
+        )
+    except RateLimitExceededError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="GitHub API rate limit reached. Please try again later."
+        )
+    except GitHubAPIException as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.exception(f"Unexpected error answering question for '{clean_url}': {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to query RepoLens intelligence: {str(e)}"
+            detail="Unexpected backend/GitHub integration error. Please try again later."
         )

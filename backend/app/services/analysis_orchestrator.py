@@ -1,8 +1,16 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 import httpx
-from app.services.github_client import GitHubClient, GitHubAPIException, InvalidGitHubURLError, RepositoryNotFoundError, RateLimitExceededError
+from app.services.github_client import (
+    GitHubClient,
+    GitHubAPIException,
+    InvalidGitHubURLError,
+    RepositoryNotFoundError,
+    RateLimitExceededError,
+    parse_github_repository_url
+)
 from app.models.repository import RepoAnalysisResponse
 from app.analyzers.metadata_analyzer import analyze_metadata
 from app.analyzers.language_analyzer import analyze_languages
@@ -14,16 +22,22 @@ from app.analyzers.health_analyzer import calculate_health_score
 from app.analyzers.assistant_analyzer import generate_preset_previews
 from app.models.repository import PullRequestInfo, IssuesAndPRsAnalysis, BranchesAnalysis, BranchItem
 
+logger = logging.getLogger("repolens.orchestrator")
+
 class AnalysisOrchestrator:
     def __init__(self):
         self.client = GitHubClient()
 
     async def analyze_repository(self, url_or_slug: str) -> RepoAnalysisResponse:
-        owner, repo = self.client.parse_repo_url(url_or_slug)
+        logger.info(f"Received repository request: {url_or_slug}")
+        owner, repo = parse_github_repository_url(url_or_slug)
+        logger.info(f"Resolved repository: {owner}/{repo}")
 
         async with httpx.AsyncClient(timeout=30.0) as http_client:
             # 1. Fetch main repo metadata
+            logger.info(f"Fetching repository metadata for {owner}/{repo}")
             raw_repo, repo_headers = await self.client.get(http_client, f"repos/{owner}/{repo}")
+            logger.info(f"Repository successfully loaded: {owner}/{repo}")
             default_branch = raw_repo.get("default_branch", "main")
             remaining_limit = None
             if "x-ratelimit-remaining" in repo_headers:
